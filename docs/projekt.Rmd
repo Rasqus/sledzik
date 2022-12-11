@@ -1,0 +1,413 @@
+---
+title: "Programowanie w R: Projekt - Karłowacenie śledzi"
+author: "Wojciech Marciniak 141274"
+output: 
+  html_document: 
+    toc: yes
+    toc_float: yes
+    theme: spacelab
+    number_sections: yes
+    self_contained: yes
+date: "`r Sys.Date()`"
+---
+
+```{css, echo=FALSE}
+.header-section-number::after {
+  content: ".";
+}
+```
+
+# Raport 
+Niniejszy raport przedstawia analizę danych dotyczących połowu śledzi i próbuje odpowiedzieć na pytanie co jest przyczyną zaobserwowanego karłowacenia śledzi oceanicznych wyławianych w Europie na przestrzeni ostatnich lat.
+Przeprowadzona analiza okazała się bardzo trudna za względu na niestandardową strukturę danych i przez to tworzenie modeli okazało się bardzo skomplikowane. Sama obserwacja wielkości śledzia na podstawie tych danych na przestrzeni lat jest również niemożliwa.
+Mimo to udało się ustalić, że największy wpływ na rozmiar śledzi ma prawdopodobnie zmieniająca się temperatura nad powierzchnią wody, jak i natężenie połowów.
+
+# Wykorzystane biblioteki
+```{r libraries, message=FALSE, warning=FALSE}
+library(knitr)
+library(dplyr)
+library(caret)
+library(kableExtra)
+library(tidyr)
+library(tidyverse)
+library(ggplot2)
+library(plotly)
+library(gganimate)
+library(corrplot)
+library(ggpubr)
+library(vtable)
+```
+
+
+# Zapewnienie powtarzalności wyników przy każdym uruchomieniu
+
+Aby zapewnić powtarzalność rezultatów podczas kolejnych wykonań skryptu, ziarno zostaje ustawione na konkretną stałą.
+```{r seed}
+set.seed(23)
+```
+
+# Wczytanie danych z pliku
+Dane dotyczące śledzi znajdują się w pliku "sledzie.csv". Każdy wiersz odpowiada pojedynczemu połowowi i jest opisany przez 16 atrybutów, m.in. length - będące długością złowionego śledzia.
+```{r loadData, message=FALSE, warning=FALSE}
+df <- read.csv(
+  file = "sledzie.csv", header = TRUE, comment.char = "",
+   colClasses = c("integer", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "numeric", "integer", "numeric"),
+  col.names = c("lp", "length", "cfin1", "cfin2", "chel1", "chel2", "lcop1", "lcop2", "fbar", "recr", "cumf", "totaln", "sst", "sal", "xmonth", "nao"),
+  na.strings = "?"
+)
+```
+
+Fragment wczytanych danych prezentuje poniższa tabela:
+```{r presentTable, echo=FALSE}
+kable(head(df, 8)) %>%
+  kable_styling("striped") %>%
+  scroll_box(width="100%")
+```
+
+
+
+# Podsumowanie zbioru danych
+
+## Zawartość i rozmiar zbioru
+
+```{r dataProperties, echo=FALSE}
+nr_rows = count(df)
+nr_col = ncol(df)
+incomplete = nr_rows - count(df[complete.cases(df),])
+```
+
+Zbiór danych zawiera `r nr_rows` wierszy i `r nr_col` kolumn.
+Każdy wiersz składa się z następujących danych:
+
+- `length` - analizowana długość złowionego śledzia [cm]
+- `cfin1` - dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 1];
+- `cfin2` - dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 2];
+- `chel1` - dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 1];
+- `chel2` - dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 2];
+- `lcop1` - dostępność planktonu [zagęszczenie widłonogów gat. 1];
+- `lcop2` - dostępność planktonu [zagęszczenie widłonogów gat. 2];
+- `fbar` - natężenie połowów w regionie [ułamek pozostawionego narybku];
+- `recr` - roczny narybek [liczba śledzi];
+- `cumf` - łączne roczne natężenie połowów w regionie [ułamek pozostawionego narybku];
+- `totaln` - łączna liczba ryb złowionych w ramach połowu [liczba śledzi];
+- `sst` - temperatura przy powierzchni wody [°C];
+- `sal` - poziom zasolenia wody [Knudsen ppt];
+- `xmonth`-  miesiąc połowu [numer miesiąca];
+- `nao` - oscylacja północnoatlantycka [mb].
+
+## Właściwości zbioru
+
+W zbiorze występują 3 następujące problemy: 
+
+- w niektórych komórkach występują wartości nieznane, oznaczone jako "?" - wierszy zawierających wartości nieznane jest aż `r incomplete`. 
+
+- nie ma w zbiorze żadnych danych jednoznacznie wskazujących, w którym roku dokonano konkretnego połowu (jest tylko miesiąc).
+
+- dane w zbiorze nie są chronologiczne
+
+Na szczęście analizując dane można zauważyć, że dane można pogrupować po jednej z kolumn `recr` albo `totaln`, które z definicji zawierają wartość jednakową dla danego roku, oraz po miesiącu `xmonth`. Ponadto można zauważyć ważną własność: wszystkie wartości w kolumnach poza `length` są takie same dla danego roku i miesiąca, co można udowodnić w następujący sposób: policzyć liczbę wartości po pogrupowaniu. Jeżeli występują wyłącznie 1 lub 2 wartości: czyli konkretna dla danego atrybutu wartość z danego roku i miesiąca i ewentualne "?", to oznacza, że nie ma już żadnych innych wartości. Dowodem jest poniższa tabela i wynik.
+
+```{r unknownData, warning=FALSE, message=FALSE}
+
+df_sum <- df %>% group_by(recr, xmonth) %>% summarize(length(length), n_distinct(cfin1), n_distinct(cfin2), n_distinct(chel1), n_distinct(chel2), n_distinct(lcop1), n_distinct(fbar), n_distinct(fbar), n_distinct(cumf), n_distinct(totaln), n_distinct(sst), n_distinct(sal), n_distinct(nao)) %>% ungroup()
+
+kable(df_sum) %>%
+  kable_styling("striped") %>%
+  scroll_box(width="100%", height="300px")
+
+```
+
+```{r count, results='hide'}
+num = sum(1 * (1 %in% df_sum[!names(df_sum) %in% c("recr", "xmonth")]) | (2 %in% df_sum[!names(df_sum) %in% c("recr", "xmonth")]))
+```
+
+
+Grup z więcej niż 2 wartościami jest dokładnie (num =) `r num`, a więc wniosek może być następujący: jeżeli w wierszu dla konkretnego atrybutu występuje wartość NA, to można wyznaczyć ją na podstawie prawidłowej wartości w ramach grupy. Przy okazji udowodniono również brak wystąpienia potencjalnie problematycznej sytuacji: nie istnieją lata, w których wartość `recr` byłaby taka sama (aby to było prawdą musiałoby być więcej niż 1 wartość dla co najmniej jednej z innych kolumn, w tym `totaln` dla danego roku po pogrupowaniu)
+
+Jeżeli chodzi o chronologię danych, to zbiór danych na pewno *NIE* jest uporządkowany chronologicznie, co można sprawdzić w następujący sposób:
+
+```{r checkIfChronological, warning=FALSE, message=FALSE, results='hide'}
+df_sum <- df %>% group_by(recr, xmonth) %>% 
+  summarize(min_lp=min(lp), max_lp=max(lp)) %>% 
+  arrange(min_lp) %>%
+  ungroup()
+
+kable(df_sum) %>%
+  kable_styling("striped") %>%
+  scroll_box(width="100%", height="200px")
+
+```
+
+Jak można zauważyć analizując powyższą tabelę, zakresy indeksów wierszy dopasowanych do poszczególnych grup nachodzą na siebie, co przeczy jakiejkolwiek chronologii danych. Z tego powodu nie będzie możliwe zobrazowanie rozmiaru śledzia w czasie na przestrzeni lat, jedyne co można zobrazować to zmiana jego rozmiaru na przestrzeni jednego roku.
+
+
+## Usunięcie wartości NA ze zbioru
+
+Ze względu na rozważania w poprzednim podpunkcie, nieprawidłowym podejściem byłoby usunięcie wierszy zawierających wartości NA ze zbioru, ponieważ dla każdej z nich można wyznaczyć konkretną prawidłową wartość na podstawie wartości odnalezionych przy zgrupowaniu danych, co uczyniono za pomocą poniższego fragmentu kodu:
+
+```{r replaceNA, warning=FALSE, message=FALSE}
+df_group <- df %>%
+  drop_na() %>%
+  group_by(recr, xmonth) %>%
+  summarize_all(mean)
+
+df_group_index <- df_group %>%
+  ungroup()
+
+df_group_index %>%
+  rowwise() %>%
+  do (
+    df[df$xmonth == .$xmonth & df$recr == .$recr, ] %>%
+    mutate_all(funs(replace(., is.na(.), first(na.omit(.)))))
+  ) %>%
+  arrange(lp) -> df
+
+kable(head(df, 8)) %>%
+  kable_styling("striped") %>%
+  scroll_box(width="100%")
+```
+
+
+# Szczegółowa analiza wartości atrybutów
+
+## Długość śledzia - length
+
+```{r message=FALSE, warning=FALSE, echo=FALSE}
+
+ggplot(df, aes(y=df$length)) +
+    geom_boxplot(width=0.7) + 
+    coord_flip() + 
+    labs(y='length') + theme_bw() + 
+    theme(axis.ticks.y=element_blank()) +
+    theme(axis.text.y=element_blank())
+
+summary(df$length)
+```
+
+Niestety dane w zbiorze z pewnością nie są chronologiczne, dlatego nie można zaprezentować rozmiaru śledzi w kolejnych latach. Można natomiast prześledzić (pun not intended), jak zmienia się długość śledzia na przestrzeni roku, co pokazuje poniższa animacja:
+
+```{r message=FALSE, warning=FALSE}
+
+p <- df %>%
+  ggplot(aes(x = length, fill = factor(xmonth))) + 
+  geom_density(aes(y = after_stat(count)), adjust=1.5) +
+  transition_time(xmonth) +
+  labs(title = "Miesiąc: {frame_time}", y = "Ilość złowionych śledzi",
+       x = "Długość śledzia", fill = "Miesiąc") +
+  theme_bw()
+animate(p)
+```
+
+## Dostępność planktonu
+
+W tym podpunkcie przedstawiono na wykresach wszystkie parametry dotyczące dostępności planktonu
+
+```{r showPlanctonData}
+columnNames = c("cfin1", "cfin2", "chel1", "chel2", "lcop1", "lcop2")
+
+kable(summary(data.frame(df[columnNames]))) %>%
+  kable_styling("striped")
+
+```
+
+Warto odsiać dla każdego z parametrów maksymalne wartości, które wyglądają na outliery.
+
+```{r outliers}
+
+df <- df %>% filter(cfin1 < quantile(df$cfin1, 0.975) | 
+                    cfin2 < quantile(df$cfin2, 0.975) |
+                    chel1 < quantile(df$chel1, 0.975))
+
+```
+
+
+```{r message=FALSE, warning=FALSE}
+
+dim(df)
+
+drawBoxplot <- function(column, label, fillColor, shapeColor){
+  p <- ggplot(df, aes(y=column)) +
+    geom_boxplot(width=0.7, fill=fillColor, color=shapeColor) + 
+    coord_flip() + 
+    labs(y=label) + theme_bw() + 
+    theme(axis.ticks.y=element_blank()) +
+    theme(axis.text.y=element_blank())
+  p
+}
+
+p1<-drawBoxplot(df$cfin1, "cfin1", "skyblue", "dimgray")
+p2<-drawBoxplot(df$cfin2, "cfin2", "lightsalmon", "dimgray")
+p3<-drawBoxplot(df$chel1, "chel1", "darkseagreen", "dimgray")
+p4<-drawBoxplot(df$chel2, "chel2", "aquamarine", "dimgray")
+p5<-drawBoxplot(df$lcop1, "lcop1", "tomato", "dimgray")
+p6<-drawBoxplot(df$lcop2, "lcop2", "thistle", "dimgray")
+
+ggarrange(p1, p2, p3, p4, p5, p6)
+```
+
+## Roczny narybek
+
+```{r message=FALSE, warning=FALSE}
+kable(summary(data.frame(df$recr))) %>%
+  kable_styling("striped")
+
+drawBoxplot(df$recr, "Roczny narybek [liczba śledzi]", "skyblue", "dimgray")
+```
+
+
+## Roczne natężenie połowów w regionie 
+
+```{r message=FALSE, warning=FALSE}
+kable(summary(data.frame(df$cumf))) %>%
+  kable_styling("striped")
+
+drawBoxplot(df$cumf, "Natężenie połowów w regionie", "skyblue", "dimgray")
+```
+
+## Łączna liczba ryb złowionych w ramach połowu
+
+```{r message=FALSE, warning=FALSE}
+kable(summary(data.frame(df$totaln))) %>%
+  kable_styling("striped")
+
+drawBoxplot(df$totaln, "Łączna liczba ryb złowionych w ramach połowu", "skyblue", "dimgray")
+```
+
+## Temperatura przy powierzchni wody
+
+```{r message=FALSE, warning=FALSE}
+kable(summary(data.frame(df$sst))) %>%
+  kable_styling("striped")
+
+drawBoxplot(df$sst, "Temperatura przy powierzchni wody [st. C]", "skyblue", "dimgray")
+```
+
+## Poziom zasolenia wody
+
+```{r message=FALSE, warning=FALSE}
+kable(summary(data.frame(df$sal))) %>%
+  kable_styling("striped")
+
+drawBoxplot(df$sal, "Poziom zasolenia wody [Knudsen ppt]", "skyblue", "dimgray")
+```
+
+## Oscylacja północnoatlantycka
+
+```{r message=FALSE, warning=FALSE}
+kable(summary(data.frame(df$nao))) %>%
+  kable_styling("striped")
+
+drawBoxplot(df$nao, "Oscylacja północnoatlantycka [mb]", "skyblue", "dimgray")
+```
+
+
+# Analiza korelacji między atrybutami
+
+Na poniższym wykresie przedstawiono korelację między poszczególnymi atrybutami występującymi w zbiorze.
+
+```{r corAnalysis}
+
+new_df <- df %>% select(-recr)
+corrplot(cor(new_df), method="color")
+
+```
+
+Z powyższego wykresu można wysunąć następujące wnioski:
+
+- miesiąc połowu jest bardzo słabo skorelowany z długością śledzia
+
+- sst czyli temperatura przy powierzchni jest dość silnie skorelowana z długością śledzia
+
+- mamy następujące pary silnie skorelowanych parametrów: chel1 i lcop1, chel2 i lcop2
+
+Ostatni podpunkt sugeruje uproszczenie danych przez pozbycie się kolumn - do usunięcia wybrane zostały `lcop1` i `lcop2`. Usuwane zostaną również kolumny `recr` i `totaln`, które ze swojej definicji nie mają wpływu na rozmiar śledzia. Usunięto również `lp`.
+
+```{r dropColumns}
+df <- df %>% select(c(-lcop1, lcop2, recr, totaln, lp))
+df
+```
+
+# Budowa regresorów
+
+W niniejszym podpunkcie dokonana zostanie próba utworzenia regresorów przewidujących rozmiar śledzia.
+Dane podzielono na zbiór treningowy oraz testowy (5:1). Wykorzystana zostanie również ocena krzyżowa do wydzielenia danych kontrolnych.
+
+```{r buildPartition}
+inTraining <- createDataPartition(
+  y = df$length,
+  p = .8,
+  list = FALSE
+)
+training <- df[inTraining, ]
+testing <- df[-inTraining, ]
+
+ctrl <- trainControl(
+    method = "repeatedcv",
+    number = 2,
+    repeats = 5,
+    allowParallel = TRUE,
+    verboseIter = FALSE
+)
+```
+
+Do uczenia modeli zostaną wykorzystane algorytm zwykłej regresji liniowej oraz random forest.
+
+
+## Regresja liniowa
+
+```{r lm}
+
+fitTune_lm <- train(
+  length ~ .,
+  data = training,
+  method = "lm",
+  metric = "RMSE",
+  trControl = ctrl,
+  preProc = c("center", "scale"),
+  tuneGrid = expand.grid(intercept=c(TRUE, FALSE))
+)
+fitTune_lm
+ggplot(varImp(fitTune_lm))
+```
+
+## Random forest
+
+```{r rf, cache=TRUE}
+
+fitTune_rf <- train(
+  length ~ .,
+  data = training,
+  method = "rf",
+  metric = "RMSE",
+  trControl = ctrl,
+  preProc = c("center", "scale"),
+  ntree = 10,
+  tuneGrid = expand.grid(mtry=c(2:8))
+)
+fitTune_rf
+ggplot(varImp(fitTune_rf))
+```
+
+# Porównanie algorytmów
+
+## Podsumowanie modeli
+```{r compareMethods}
+summary(resamples(list(fitTune_lm, fitTune_rf)))
+```
+
+## Predykcja
+
+```{r predict}
+kable(postResample(predict(fitTune_lm, newdata=testing), testing$length), caption="Regresja liniowa") %>%
+  kable_styling("striped")
+
+kable(postResample(predict(fitTune_rf, newdata=testing), testing$length), caption="Random forest") %>%
+  kable_styling("striped")
+```
+
+Zgodnie z przewidywaniami algorytm Random Forest spisał się lepiej niż regresja liniowa i najbardziej istotnym atrybutem okazała się temperatura przy powierzchni wody.
+
+
+# Wnioski z analizy 
+
+Analizując uzyskane wyniki z korelacji oraz z regresorów można zauważyć, że na długość śledzia zdecydowanie największy wpływ ma `sst`, czyli temperatura przy powierzchni wody, co może być związane z ocieplaniem się klimatu. Natężenie połowów w regionie oraz roczne natężenie połowów również mogą być czynnikiem, przez który zmniejsza się długość śledzia - częstsze połowy sprawiają, że osobniki nie są w stanie tak szybko dorastać lub rozmnażać się. Również łączna liczba ryb złowionych w ramach połowu może mieć wpływ z tego samego powodu.
